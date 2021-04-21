@@ -1,0 +1,343 @@
+#!/bin/zsh +e
+
+#Dev: Jonathan Brunath
+#Email: jbrunath@tucows.com
+
+#NOTE: This script is designed to run on macOS Catalina 10.15.7, the script may not work under other OSes
+
+datestamp=$(date +%y-%m-%d_%H:%M:%S)
+interval=1
+count=5
+duration=$(( count * interval ))
+maxSamples=$((2**16))
+
+procs=""
+procs_def="kernel"
+declare -a topData_arr
+mode="process"
+fileExt="log"
+fileDelimiter="\t,"
+verbose=off
+n=0
+overwrite=off
+samMode=""
+endless=off
+topMode=""
+
+headerString_proc_arr=( Datetime PID command CPU% CPU_Time Threads Full_Command )
+headerString_loadavg_arr=( Datetime 1min_Load 5min_Load 15min_Load 1min_Util 5min_Util 15min_Util Processes Running Sleeping Threads )
+headerString_proc="Sample #"
+headerString_loadavg="Sample #"
+
+for i in $headerString_proc_arr; do headerString_proc="$headerString_proc$fileDelimiter$i"; done
+for i in $headerString_loadavg_arr; do headerString_loadavg="$headerString_loadavg$fileDelimiter$i"; done
+
+function filterTop {
+	# -o th : sort by Thread count
+	# -n 10 : limit # of processes listed to 10
+	# -stats : filter columns by csv string
+	# -R : reduces top overhaul resources
+	# -l 1 : prints only 1 sample output
+	
+	#run the top command and parse the output with grep
+	#take the result and parse it by newline into a array of lines
+	case "$topMode" in
+		e)
+			topData=("${(@f)$(top -e -o th -stats pid,command,cpu,time,th -R -l 2 | grep $1)}")
+			;;
+		a)
+			topData=("${(@f)$(top -a -o th -stats pid,command,cpu,time,th -R -l 2 | grep $1)}")
+			;;
+		*)
+			topData=("${(@f)$(top -o th -stats pid,command,cpu,time,th -R -l 2 | grep $1)}")
+			;;
+	esac
+	topData_arr=()							#clear the array of old data before writing new data
+	for y in $( echo "$topData" ); do topData_arr+=$y; done 	#convert to proper array to allow string/array operations
+}
+function directFilterTop {
+	filterTop "$1"
+	echo "$topData"
+}
+function writeProcData { 
+	timestamp=$(date +%d/%m/%y-%H:%M:%S)
+	pid_1=""
+	init=0
+	foreach i in ${topData[@]}; do
+		#echo ""
+		#echo "init=$init"
+		#echo "pid_1=$pid_1"
+
+		#remove excess whitespace
+		x=$(echo $i | tr -s " ")		
+
+		declare -a data
+		for y in $( echo "$x" ); do
+			data+=$y
+		done
+
+		PID=${data[1]}
+		unset data
+
+		#echo "PID=$PID"
+
+		if [ "$init" = 1 ]; then
+			if [ "$pid_1" = "$PID" ]; then
+				init=$((init+1))
+			fi
+		fi
+		if [ "$init" = 0 ]; then
+			pid_1=$PID
+			#echo "$pid_1"
+			init=$((init+1))
+		fi
+
+		if [ "$init" = 2 ]; then
+			line="$n$fileDelimiter$timestamp"
+
+			for y in $( echo "$x" ); do
+				line="$line$fileDelimiter$y"
+			done
+	
+			cmd=$(ps $PID)
+			cmd=${cmd[(ws: :)16]}
+			line="$line$fileDelimiter$cmd"
+	
+			echo "$line" >> $filename
+	
+			if [ "$verbose" = "on" ]; then
+				echo "$line"
+			fi
+		fi
+	done
+	unset pids
+}
+function loadAvg {
+	#get data
+	filterTop "Load Avg"
+	timestamp=$(date +%d/%m/%y-%H:%M:%S)
+	
+	#parse string components
+	oneMin=${topData_arr[(ws: :)3]} #extract 3rd term in space delimited string
+	oneMin=${oneMin[(ws:,:)1]} 	#remove trailing comma
+	fiveMin=${topData_arr[(ws: :)4]} 		#extract 4th term in space delimited string
+	fiveMin=${fiveMin[(ws:,:)1]} 	#remove trailing comma
+	fifteenMin=${topData_arr[(ws: :)5]} 		#extract 5th term in space delimited string
+	
+	#get core count
+	cores=$(sysctl -a | grep machdep.cpu.core_count)
+	cores=${cores[(ws: :)2]} #extract 2nd term in space delimited string
+
+	#calc true load avg by dividing by core count
+	#1.00 = 100% CPU utilization
+	#2.00 = 200% CPU utilization, which means there are twice as many queued processes than the CPU can handle
+	oneMin_acc=$(((oneMin/cores)*100))
+	#oneMin_acc=$(printf "%.2g" "$oneMin_acc")
+	fiveMin_acc=$(((fiveMin/cores)*100))
+	fifteenMin_acc=$(((fifteenMin/cores)*100))
+
+	filterTop "Processes" 		#get proc/thread info
+	totalProcesses=${topData_arr[(ws: :)2]}
+	runningProcesses=${topData_arr[(ws: :)4]}
+	sleepingProcesses=${topData_arr[(ws: :)6]}
+	totalThreads=${topData_arr[(ws: :)8]}
+
+	#output result to csv
+	line="$n$fileDelimiter$timestamp"
+	line="$line$fileDelimiter$oneMin"
+	line="$line$fileDelimiter$fiveMin"
+	line="$line$fileDelimiter$fifteenMin"
+	line="$line$fileDelimiter$oneMin_acc"
+	line="$line$fileDelimiter$fiveMin_acc"
+	line="$line$fileDelimiter$fifteenMin_acc"
+	line="$line$fileDelimiter$totalProcesses"
+	line="$line$fileDelimiter$runningProcesses"
+	line="$line$fileDelimiter$sleepingProcesses"
+	line="$line$fileDelimiter$totalThreads"
+
+	
+	echo "$line" >> $filename
+
+	if [ "$verbose" = "on" ]; then
+		if [ "$topMode" = "a" ]; then
+			echo -ne '\e[K'
+		fi
+		echo "$line"
+		if [ "$topMode" = "a" ]; then
+			echo -ne '\e[1A'
+			echo -n ""
+		fi
+	fi
+} 
+function sampleTop {
+	
+	echo "Log file: $filename"
+	if [ "$1" = "" ]; then
+		echo "Warning: No input, using defaults sampling parameters"
+		echo "Warning: No PID's specified, defaulting to \"$procs_def\""
+		1=$procs_def
+	fi
+
+	echo ""
+	echo "============================================"
+	echo "Sampling Duration (seconds): $duration"
+	echo "Sampling Interval: $interval"		
+	echo "Sampling Count: $count"
+	echo ""
+	
+	if [ "$1" = "Load Avg" ]; then
+		headerString="$headerString_loadavg"
+		echo "Sampling Load Averages and Process Stats"
+	else
+		echo "Process(s) to sample: "
+		foreach i in $@; do
+			echo " - $i"
+       		done
+		
+		#set CSV header
+		headerString="$headerString_proc"
+	fi
+
+	echo "$headerString" >> $filename
+	echo ""
+	if [ "$verbose" = "on" ]; then
+		echo "$headerString"
+		sleep $interval
+	fi
+
+	if [ "$endless" = "on" ]; then
+		samples="$maxSamples"
+	else
+		samples=$count
+	fi
+
+	for (( k=1; k<=$samples; k++ )); do
+		n=$k
+		if [ "$verbose" = "off" ]; then
+			echo "Samples Recorded: $k/$count"
+		fi
+
+		if [ "$1" = "Load Avg" ]; then
+			loadAvg
+		else
+			foreach i in $@; do
+				filterTop $i
+				writeProcData
+			done
+		fi
+		
+		#Shift terminal cursor back 1 line and clear line
+		if [ "$k" != "$count" ]; then
+			sleep $interval
+			if [ "$verbose" = "off" ]; then
+				echo -ne '\e[1A\e[K'
+			fi
+		fi
+	done
+	echo ""
+	echo "============================================"
+	read "?Open the results? (y/n): " choice
+	if [ "$choice" = "y" ]; then
+		nano $filename	
+	fi
+}
+function init {
+	echo "============================================"
+	echo ""
+	
+	if [ "$overwrite" = "on" ]; then
+		filename="topp-$mode.$fileExt"
+	else
+		filename="topp[$mode]$datestamp.$fileExt"
+	fi
+
+	if [ -e "$filename" ]; then
+		if [ "$overwrite" = "on" ]; then
+			echo "Warning: Overwriting previous log file"
+			rm $filename
+			sampleTop $@
+		else
+			echo "Error: Filename exists $filename"
+		fi
+	else
+		sampleTop $@
+	fi
+}
+function parseFlags {
+	case $1 in
+		'-H')	#Hours to seconds to samples
+			if [ "$samMode" != "count" ]; then
+				duration=$2
+				duration=$(( duration * 3600 ))
+				count=$(( duration / interval ))
+				samMode="duration"
+			else
+				"Warning: Ignoring duration parameter due to conflict with sample count parameter"
+			fi
+			parseFlags ${@:3}
+			;;
+		'-M')	#Minutes to seconds to samples
+			if [ "$samMode" != "count" ]; then
+				duration=$2
+				duration=$(( duration * 60 ))
+				count=$(( duration / interval ))
+				samMode="duration"
+			else
+				"Warning: Ignoring duration parameter due to conflict with sample count parameter"
+			fi
+			parseFlags ${@:3}
+			;;
+		'-S')	#Seconds to samples
+			if [ "$samMode" != "count" ]; then
+				duration=$2
+				count=$(( duration / interval ))
+				samMode="duration"
+			else
+				"Warning: Ignoring duration parameter due to conflict with sample count parameter"
+			fi
+			parseFlags ${@:3}
+			;;
+		'-I')	#Specify Interval between samples
+			interval=$2
+			duration=$(( count * interval ))
+			parseFlags ${@:3}
+			;;
+		'-n')	#Direct to Samples, calc duration
+			count=$2
+			duration=$(( count * interval ))
+			samMode="count"
+			parseFlags ${@:3}
+			;;
+		'-L')	#Get CPU Load Averages
+			mode="loadavg"
+			init "Load Avg"
+			;;
+		'-f')	#direct filterTop
+			directFilterTop "$2"
+			;;
+		'-E')	#continuous mode
+			duration="\u221e"
+			count="\u221e"
+			endless="on"
+			parseFlags ${@:2}
+			;;
+		'-t')	#top mode
+			topMode="$2"
+			parseFlags ${@:3}
+			;;
+		'-V')	#enable verbose
+			verbose=on
+			parseFlags ${@:2}
+			;;
+		'-o')	#enable log file overwrite
+			overwrite=on
+			parseFlags ${@:2}
+			;;
+		*)	
+			init $@
+			;;
+	esac		
+}
+			
+#RUN
+parseFlags $@
