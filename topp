@@ -48,6 +48,7 @@ function filterTop {
 	
 	#run the top command and parse the output with grep
 	#take the result and parse it by newline into a array of lines
+
 	case "$topMode" in
 		e)
 			topData=("${(@f)$(top -e -o th -stats pid,command,cpu,time,th -R -l 2 | grep $1)}")
@@ -269,6 +270,8 @@ function sampleTop {
 		if [ "$verbose" = "off" ]; then
 			echo "Samples Recorded: $k/$count"
 		fi
+		
+		t1=$(date +%s)
 
 		if [ "$mode" = "loadavg" ]; then
 			loadAvg
@@ -284,7 +287,21 @@ function sampleTop {
 		
 		#Shift terminal cursor back 1 line and clear line
 		if [ "$k" != "$count" ]; then
-			sleep $interval
+			delta=$(($(date +%s) - t1))
+			deltaModdedInterval=$((interval - delta))
+			if [[ $delta -gt 1 ]]; then
+				echo ""
+				echo "Data Write Operation Time Delta: $delta"
+				if [[ $deltaModdedInterval -lt 0 ]]; then
+					echo "New Interval: $deltaModdedInterval"
+					echo "==========================================================================================="
+					echo "ERROR: Data write operation took longer than defined sampling interval, cancelling process"
+					echo "==========================================================================================="
+					exit
+				fi
+				echo ""
+			fi
+			sleep $deltaModdedInterval
 			if [ "$verbose" = "off" ]; then
 				echo -ne '\e[1A\e[K'
 			fi
