@@ -11,18 +11,22 @@ count=5
 duration=$(( count * interval ))
 maxSamples=$((2**16))
 
+defDurationMins=30
+defInterval=60
 procs=""
 procs_def="kernel"
 declare -a topData_arr
 mode="process"
-fileExt="log"
-fileDelimiter="\t,"
+fileExt="csv"
+fileDelimiter=","
 verbose=off
 n=0
 overwrite=off
 samMode=""
 endless=off
 topMode=""
+todayDate=$(date +%Y/%m/%d)
+pid_omit=( Processes: Load CPU SharedLibs: MemRegions: PhysMem: VM: Networks: Disks: PID $todayDate )
 
 headerString_proc_arr=( Datetime PID command CPU% CPU_Time Threads Full_Command )
 headerString_loadavg_arr=( Datetime 1min_Load 5min_Load 15min_Load 1min_Util 5min_Util 15min_Util Processes Running Sleeping Threads )
@@ -32,6 +36,9 @@ headerString_loadavg="Sample #"
 for i in $headerString_proc_arr; do headerString_proc="$headerString_proc$fileDelimiter$i"; done
 for i in $headerString_loadavg_arr; do headerString_loadavg="$headerString_loadavg$fileDelimiter$i"; done
 
+function getSerialNumber {
+	echo $(system_profiler SPHardwareDataType | awk '/Serial/ {print $4}')
+}
 function filterTop {
 	# -o th : sort by Thread count
 	# -n 10 : limit # of processes listed to 10
@@ -54,6 +61,37 @@ function filterTop {
 	esac
 	topData_arr=()							#clear the array of old data before writing new data
 	for y in $( echo "$topData" ); do topData_arr+=$y; done 	#convert to proper array to allow string/array operations
+}
+function rawTop {
+        # -o th : sort by Thread count
+        # -n 10 : limit # of processes listed to 10
+        # -stats : filter columns by csv string
+        # -R : reduces top overhaul resources
+        # -l 1 : prints only 1 sample output
+
+        #run the top command and parse the output with grep
+        #take the result and parse it by newline into a array of lines
+        case "$topMode" in
+                e)
+                        topData=("${(@f)$(top -e -o th -stats pid,command,cpu,time,th -R -l 2)}")
+                        ;;
+                a)
+                        topData=("${(@f)$(top -a -o th -stats pid,command,cpu,time,th -R -l 2)}")
+                        ;;
+                *)
+                        topData=("${(@f)$(top -o th -stats pid,command,cpu,time,th -R -l 2)}")
+                        ;;
+        esac
+        topData_arr=()                                                  #clear the array of old data before writing new data
+        x=0
+	for y in $( echo "$topData" ); do
+		if [ "$y" = "" ]; then
+			x=x+1
+		fi
+		if [ "$x" = "2" ]; then
+			topData_arr+=$y
+		fi
+	done         #convert to proper array to allow string/array operations
 }
 function directFilterTop {
 	filterTop "$1"
@@ -80,33 +118,43 @@ function writeProcData {
 		unset data
 
 		#echo "PID=$PID"
-
-		if [ "$init" = 1 ]; then
-			if [ "$pid_1" = "$PID" ]; then
+		skip=false
+		for p in ${pid_omit[@]}; do
+			#echo "$p"
+			if [ "$PID" = "$p" ]; then
+				skip=true
+				#echo "Omitting $p"
+				break
+			fi
+		done
+		if [ "$skip" = "false" ]; then
+			if [ "$init" = 1 ]; then
+				if [ "$pid_1" = "$PID" ]; then
+					init=$((init+1))
+				fi
+			fi
+			if [ "$init" = 0 ]; then
+				pid_1=$PID
+				#echo "$pid_1"
 				init=$((init+1))
 			fi
-		fi
-		if [ "$init" = 0 ]; then
-			pid_1=$PID
-			#echo "$pid_1"
-			init=$((init+1))
-		fi
-
-		if [ "$init" = 2 ]; then
-			line="$n$fileDelimiter$timestamp"
-
-			for y in $( echo "$x" ); do
-				line="$line$fileDelimiter$y"
-			done
 	
-			cmd=$(ps $PID)
-			cmd=${cmd[(ws: :)16]}
-			line="$line$fileDelimiter$cmd"
+			if [ "$init" = 2 ]; then
+				line="$n$fileDelimiter$timestamp"
 	
-			echo "$line" >> $filename
-	
-			if [ "$verbose" = "on" ]; then
-				echo "$line"
+				for y in $( echo "$x" ); do
+					line="$line$fileDelimiter$y"
+				done
+		
+				cmd=$(ps $PID)
+				cmd=${cmd[(ws: :)16]}
+				line="$line$fileDelimiter$cmd"
+		
+				echo "$line" >> $filename
+		
+				if [ "$verbose" = "on" ]; then
+					echo "$line"
+				fi
 			fi
 		fi
 	done
@@ -173,11 +221,16 @@ function sampleTop {
 	
 	echo "Log file: $filename"
 	if [ "$1" = "" ]; then
-		echo "Warning: No input, using defaults sampling parameters"
-		echo "Warning: No PID's specified, defaulting to \"$procs_def\""
-		1=$procs_def
+		if [ "$samMode" = "" ]; then
+			echo "Warning: No sampling parameters given, using defaults sampling parameters"
+		fi
+		if [ "$mode" = "raw" ]; then
+			1="*"	
+		else
+			echo "Warning: No PID's specified, defaulting to \"$procs_def\""
+			1=$procs_def
+		fi
 	fi
-
 	echo ""
 	echo "============================================"
 	echo "Sampling Duration (seconds): $duration"
@@ -185,7 +238,7 @@ function sampleTop {
 	echo "Sampling Count: $count"
 	echo ""
 	
-	if [ "$1" = "Load Avg" ]; then
+	if [ "$mode" = "loadavg" ]; then
 		headerString="$headerString_loadavg"
 		echo "Sampling Load Averages and Process Stats"
 	else
@@ -217,8 +270,11 @@ function sampleTop {
 			echo "Samples Recorded: $k/$count"
 		fi
 
-		if [ "$1" = "Load Avg" ]; then
+		if [ "$mode" = "loadavg" ]; then
 			loadAvg
+		elif [ "$mode" = "raw" ]; then
+			rawTop
+			writeProcData		
 		else
 			foreach i in $@; do
 				filterTop $i
@@ -246,9 +302,9 @@ function init {
 	echo ""
 	
 	if [ "$overwrite" = "on" ]; then
-		filename="topp-$mode.$fileExt"
+		filename="topp-$mode-$(getSerialNumber).$fileExt"
 	else
-		filename="topp[$mode]$datestamp.$fileExt"
+		filename="topp[$mode]_$(getSerialNumber)_$datestamp.$fileExt"
 	fi
 
 	if [ -e "$filename" ]; then
@@ -310,7 +366,8 @@ function parseFlags {
 			;;
 		'-L')	#Get CPU Load Averages
 			mode="loadavg"
-			init "Load Avg"
+			#init "loadavg"
+			parseFlags ${@:2}
 			;;
 		'-f')	#direct filterTop
 			directFilterTop "$2"
@@ -332,6 +389,20 @@ function parseFlags {
 		'-o')	#enable log file overwrite
 			overwrite=on
 			parseFlags ${@:2}
+			;;
+		'-R')	#enable raw data mode (catch all processes)
+			mode="raw"
+			#init "Raw"
+                        parseFlags ${@:2}
+			;;
+		-raw)
+			parseFlags -I $defInterval -V -M $defDurationMins -o -R
+			;;
+		-proc)
+                        parseFlags -I $defInterval -V -M $defDurationMins -o -t e iCore falcond jamf
+                        ;;
+		-load)
+			parseFlags -I $defInterval -V -M $defDurationMins -o -L
 			;;
 		*)	
 			init $@
