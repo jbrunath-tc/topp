@@ -27,6 +27,8 @@ endless=off
 topMode=""
 todayDate=$(date +%Y/%m/%d)
 pid_omit=( Processes: Load CPU SharedLibs: MemRegions: PhysMem: VM: Networks: Disks: PID $todayDate )
+dualWordCmdsA=( Google Google Cisco Activity Falcon Installer )
+dualWordCmds=( Chrome Drive AnyConnect Monitor Notificat )
 
 headerString_proc_arr=( Datetime PID command CPU% CPU_Time Threads Full_Command )
 headerString_loadavg_arr=( Datetime 1min_Load 5min_Load 15min_Load 1min_Util 5min_Util 15min_Util Processes Running Sleeping Threads )
